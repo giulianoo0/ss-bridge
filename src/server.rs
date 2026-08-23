@@ -17,10 +17,14 @@ use crate::engine::Engine;
 pub const PORT: u16 = 32227;
 
 pub async fn serve(engine: Arc<Engine>) -> anyhow::Result<()> {
+    // allow_private_network makes preflights answer Chrome's private-network
+    // check, without which a public page (ss.giuli.dev) is blocked from the
+    // preflighted POSTs even after the user has granted local network access.
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
+        .allow_private_network(true)
         .expose_headers(Any);
 
     let app = Router::new()
