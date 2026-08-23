@@ -9,6 +9,24 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 type Handle = Arc<ManagedTorrent>;
 
+const TRACKERS: &[&str] = &[
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.tracker.cl:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker.tiny-vps.com:6969/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://opentracker.i2p.rocks:6969/announce",
+    "udp://tracker.moeking.me:6969/announce",
+    "https://tracker.tamersunion.org:443/announce",
+    "udp://tracker1.bt.moack.co.kr:80/announce",
+    "udp://tracker.bittor.pw:1337/announce",
+];
+
 pub struct Engine {
     session: Arc<Session>,
     torrents: Mutex<HashMap<String, Handle>>,
@@ -42,12 +60,14 @@ impl Engine {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir).join("ss-bridge");
         std::fs::create_dir_all(&dir).ok();
-        // Maximise peers: DHT is on by default; add a listen port and UPnP so
-        // incoming connections work, not just outgoing, and fast-resume state.
+        // Maximise peers: DHT on by default, plus a listen port and UPnP for
+        // incoming connections, fast-resume, and a big pack of public trackers
+        // added to every torrent so peer discovery is fast and wide.
         let mut opts = SessionOptions::default();
         opts.enable_upnp_port_forwarding = true;
         opts.listen_port_range = Some(4240..4260);
         opts.fastresume = true;
+        opts.trackers = TRACKERS.iter().filter_map(|t| url::Url::parse(t).ok()).collect();
         let session = Session::new_with_opts(dir, opts).await?;
         Ok(Arc::new(Self { session, torrents: Mutex::new(HashMap::new()) }))
     }
