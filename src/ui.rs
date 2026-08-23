@@ -39,8 +39,8 @@ impl Render for StatusView {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x8a8f9e))
-                    .child("Abra um torrent no ss e a sala usa este app."),
+                    .text_color(rgb(0x6b7080))
+                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
     }
 }
