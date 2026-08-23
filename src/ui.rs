@@ -1,0 +1,128 @@
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::time::Duration;
+
+use gpui::{
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, TitlebarOptions, Window,
+    WindowBounds, WindowKind, WindowOptions,
+};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{TrayIconBuilder, TrayIconEvent};
+
+enum TrayCmd {
+    Show,
+    Quit,
+}
+
+struct StatusView;
+
+impl Render for StatusView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap_2()
+            .justify_center()
+            .items_center()
+            .bg(rgb(0x0a0b10))
+            .text_color(rgb(0xf4f5ff))
+            .child(div().text_xl().child("ss-bridge"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_color(rgb(0x56d364))
+                    .child(div().size_2().rounded_full().bg(rgb(0x2ecc71)))
+                    .child("rodando"),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x8a8f9e))
+                    .child("Abra um torrent no ss e a sala usa este app."),
+            )
+    }
+}
+
+fn tray_icon() -> tray_icon::Icon {
+    let img = image::load_from_memory(include_bytes!("../packaging/tray.png"))
+        .expect("tray png")
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    tray_icon::Icon::from_rgba(img.into_raw(), w, h).expect("icon")
+}
+
+fn setup_tray(tx: Sender<TrayCmd>) -> anyhow::Result<()> {
+    let menu = Menu::new();
+    let show = MenuItem::new("Abrir ss-bridge", true, None);
+    let quit = MenuItem::new("Sair", true, None);
+    menu.append(&show)?;
+    menu.append(&quit)?;
+    let show_id = show.id().clone();
+    let quit_id = quit.id().clone();
+
+    let tray = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("ss-bridge")
+        .with_icon(tray_icon())
+        .build()?;
+    std::mem::forget(tray);
+
+    let menu_tx = tx.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == quit_id {
+            let _ = menu_tx.send(TrayCmd::Quit);
+        } else if event.id == show_id {
+            let _ = menu_tx.send(TrayCmd::Show);
+        }
+    }));
+    TrayIconEvent::set_event_handler(Some(move |_event: TrayIconEvent| {
+        let _ = tx.send(TrayCmd::Show);
+    }));
+    Ok(())
+}
+
+pub fn run() {
+    Application::new().run(|cx: &mut App| {
+        let bounds = Bounds::centered(None, size(px(380.), px(200.)), cx);
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions { title: Some("ss-bridge".into()), ..Default::default() }),
+                kind: WindowKind::Normal,
+                is_resizable: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                // Closing the window keeps the app alive in the tray.
+                window.on_window_should_close(cx, |_window, cx| {
+                    cx.hide();
+                    false
+                });
+                cx.new(|_| StatusView)
+            },
+        )
+        .unwrap();
+        cx.activate(true);
+
+        let (tx, rx): (Sender<TrayCmd>, Receiver<TrayCmd>) = channel();
+        if let Err(err) = setup_tray(tx) {
+            eprintln!("tray: {err:#}");
+        }
+
+        let bg = cx.background_executor().clone();
+        cx.spawn(async move |cx| {
+            loop {
+                while let Ok(cmd) = rx.try_recv() {
+                    match cmd {
+                        TrayCmd::Show => { let _ = cx.update(|cx| cx.activate(true)); }
+                        TrayCmd::Quit => { let _ = cx.update(|cx| cx.quit()); }
+                    }
+                }
+                bg.timer(Duration::from_millis(120)).await;
+            }
+        })
+        .detach();
+    });
+}
