@@ -6,7 +6,7 @@ use gpui::{
     WindowBounds, WindowKind, WindowOptions,
 };
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
-use tray_icon::{TrayIconBuilder, TrayIconEvent};
+use tray_icon::{MouseButton, TrayIconBuilder, TrayIconEvent};
 
 use crate::update;
 
@@ -96,8 +96,10 @@ fn setup_tray(tx: Sender<TrayCmd>) -> anyhow::Result<()> {
             let _ = menu_tx.send(TrayCmd::Show);
         }
     }));
-    TrayIconEvent::set_event_handler(Some(move |_event: TrayIconEvent| {
-        let _ = tx.send(TrayCmd::Show);
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if matches!(event, TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }) {
+            let _ = tx.send(TrayCmd::Show);
+        }
     }));
     Ok(())
 }
