@@ -3,7 +3,7 @@ use std::io::SeekFrom;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context};
-use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session};
+use librqbit::{AddTorrent, AddTorrentOptions, ManagedTorrent, Session, SessionOptions};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -42,7 +42,13 @@ impl Engine {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir).join("ss-bridge");
         std::fs::create_dir_all(&dir).ok();
-        let session = Session::new(dir).await?;
+        // Maximise peers: DHT is on by default; add a listen port and UPnP so
+        // incoming connections work, not just outgoing, and fast-resume state.
+        let mut opts = SessionOptions::default();
+        opts.enable_upnp_port_forwarding = true;
+        opts.listen_port_range = Some(4240..4260);
+        opts.fastresume = true;
+        let session = Session::new_with_opts(dir, opts).await?;
         Ok(Arc::new(Self { session, torrents: Mutex::new(HashMap::new()) }))
     }
 
