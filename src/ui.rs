@@ -83,28 +83,47 @@ fn setup_tray(tx: Sender<TrayCmd>) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Show or hide the Dock icon (macOS only). Closing the window drops it to the
+// menu bar like Tailscale; showing it brings the Dock icon back.
+fn set_dock_visible(visible: bool) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc::{class, msg_send, sel, sel_impl};
+        let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
+        // NSApplicationActivationPolicyRegular = 0, Accessory = 1.
+        let policy: isize = if visible { 0 } else { 1 };
+        let _: () = msg_send![app, setActivationPolicy: policy];
+    }
+    let _ = visible;
+}
+
+fn open_window(cx: &mut App) {
+    set_dock_visible(true);
+    let bounds = Bounds::centered(None, size(px(380.), px(200.)), cx);
+    let _ = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions { title: Some("ss-bridge".into()), ..Default::default() }),
+            kind: WindowKind::Normal,
+            is_resizable: false,
+            ..Default::default()
+        },
+        |window, cx| {
+            // Closing the window drops the app to the tray and off the Dock,
+            // rather than quitting it.
+            window.on_window_should_close(cx, |_window, _cx| {
+                set_dock_visible(false);
+                true
+            });
+            cx.new(|_| StatusView)
+        },
+    );
+    cx.activate(true);
+}
+
 pub fn run() {
     Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(380.), px(200.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions { title: Some("ss-bridge".into()), ..Default::default() }),
-                kind: WindowKind::Normal,
-                is_resizable: false,
-                ..Default::default()
-            },
-            |window, cx| {
-                // Closing the window keeps the app alive in the tray.
-                window.on_window_should_close(cx, |_window, cx| {
-                    cx.hide();
-                    false
-                });
-                cx.new(|_| StatusView)
-            },
-        )
-        .unwrap();
-        cx.activate(true);
+        open_window(cx);
 
         let (tx, rx): (Sender<TrayCmd>, Receiver<TrayCmd>) = channel();
         if let Err(err) = setup_tray(tx) {
@@ -116,7 +135,16 @@ pub fn run() {
             loop {
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
-                        TrayCmd::Show => { let _ = cx.update(|cx| cx.activate(true)); }
+                        TrayCmd::Show => {
+                            let _ = cx.update(|cx| {
+                                if cx.windows().is_empty() {
+                                    open_window(cx);
+                                } else {
+                                    set_dock_visible(true);
+                                    cx.activate(true);
+                                }
+                            });
+                        }
                         TrayCmd::Quit => { let _ = cx.update(|cx| cx.quit()); }
                     }
                 }
