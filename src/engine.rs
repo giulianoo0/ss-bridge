@@ -38,6 +38,7 @@ struct Entry {
     refs: usize,
     last_active: Instant,
     pending_delete: Option<AbortHandle>,
+    selected_total: Option<u64>,
 }
 
 pub struct Engine {
@@ -81,6 +82,18 @@ fn env_duration(name: &str, default: Duration) -> Duration {
 
 fn magnet_hash(magnet: &str) -> Option<String> {
     Magnet::parse(magnet).ok()?.as_id20().map(|hash| hash.as_string())
+}
+
+const MAX_SIDE_SUBTITLE: u64 = 8 * 1024 * 1024;
+
+fn is_side_subtitle(name: &str, size: u64) -> bool {
+    if size == 0 || size > MAX_SIDE_SUBTITLE {
+        return false;
+    }
+    matches!(
+        name.rsplit('.').next().map(|e| e.to_ascii_lowercase()),
+        Some(ext) if matches!(ext.as_str(), "srt" | "ass" | "ssa" | "vtt" | "sub")
+    )
 }
 
 fn add_result(handle: &Handle) -> anyhow::Result<AddResult> {
@@ -153,17 +166,34 @@ impl Engine {
             }
         }
 
-        let response = self
-            .session
-            .add_torrent(
-                AddTorrent::from_url(magnet),
-                Some(AddTorrentOptions { overwrite: true, ..Default::default() }),
-            )
-            .await?;
+        let select_only = Magnet::parse(magnet).ok().and_then(|m| m.get_select_only());
+        // Nothing downloads until a file is chosen: a season pack would
+        // otherwise pull every episode while the picker is still open. A
+        // magnet carrying its own selection (so=) keeps it instead.
+        let options = AddTorrentOptions {
+            overwrite: true,
+            only_files: select_only.is_none().then_some(Vec::new()),
+            ..Default::default()
+        };
+        let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await?;
         let handle = response.into_handle().ok_or_else(|| anyhow!("no handle"))?;
         handle.wait_until_initialized().await?;
 
         let result = add_result(&handle)?;
+        let selected_total = select_only.map(|files| {
+            let guard = handle.metadata.load();
+            guard
+                .as_ref()
+                .map(|meta| {
+                    meta.file_infos
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| files.contains(index))
+                        .map(|(_, info)| info.len)
+                        .sum()
+                })
+                .unwrap_or(0)
+        });
         let mut map = self.torrents.lock().unwrap();
         match map.get_mut(&result.id) {
             Some(entry) => {
@@ -173,7 +203,7 @@ impl Engine {
             None => {
                 map.insert(
                     result.id.clone(),
-                    Entry { handle, refs: 1, last_active: Instant::now(), pending_delete: None },
+                    Entry { handle, refs: 1, last_active: Instant::now(), pending_delete: None, selected_total },
                 );
             }
         }
@@ -183,15 +213,39 @@ impl Engine {
     pub async fn select(&self, id: &str, file_index: usize) -> anyhow::Result<()> {
         let handle = self.touch(id)?;
         let mut only = HashSet::new();
-        only.insert(file_index);
+        let mut selected_total = 0u64;
+        {
+            let guard = handle.metadata.load();
+            let meta = guard.as_ref().ok_or_else(|| anyhow!("no metadata"))?;
+            for (index, info) in meta.file_infos.iter().enumerate() {
+                let name = info.relative_filename.to_string_lossy();
+                // Sidecar subtitles ride along: without them a subtitle read
+                // would wait on bytes the swarm is told not to fetch.
+                if index == file_index || is_side_subtitle(&name, info.len) {
+                    only.insert(index);
+                    selected_total += info.len;
+                }
+            }
+        }
+        if !only.contains(&file_index) {
+            anyhow::bail!("no such file");
+        }
         self.session.update_only_files(&handle, &only).await?;
+        if let Some(entry) = self.torrents.lock().unwrap().get_mut(id) {
+            entry.selected_total = Some(selected_total);
+        }
         Ok(())
     }
 
     pub fn stats(&self, id: &str) -> anyhow::Result<Stats> {
-        let handle = self.touch(id)?;
+        let (handle, selected_total) = {
+            let mut map = self.torrents.lock().unwrap();
+            let entry = map.get_mut(id).ok_or_else(|| anyhow!("unknown torrent"))?;
+            entry.last_active = Instant::now();
+            (entry.handle.clone(), entry.selected_total)
+        };
         let stats = handle.stats();
-        let total = stats.total_bytes.max(1);
+        let total = selected_total.unwrap_or(stats.total_bytes).max(1);
         let (peers, speed) = match &stats.live {
             Some(live) => (
                 live.snapshot.peer_stats.live as u64,
@@ -203,7 +257,7 @@ impl Engine {
             peers,
             download_speed: speed,
             downloaded: stats.progress_bytes,
-            progress: stats.progress_bytes as f64 / total as f64,
+            progress: (stats.progress_bytes as f64 / total as f64).min(1.0),
         })
     }
 
