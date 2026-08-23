@@ -8,6 +8,8 @@ use gpui::{
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
+use crate::update;
+
 enum TrayCmd {
     Show,
     Quit,
@@ -42,7 +44,24 @@ impl Render for StatusView {
                     .text_color(rgb(0x6b7080))
                     .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
+            .children(update::available().map(update_banner))
     }
+}
+
+fn update_banner(version: &'static str) -> impl IntoElement {
+    div()
+        .id("update")
+        .mt_2()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(0x1b1d2e))
+        .text_sm()
+        .text_color(rgb(0xb8bcff))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(0x262947)))
+        .on_click(|_, _, cx| cx.open_url(update::RELEASES))
+        .child(format!("v{version} disponível · baixar"))
 }
 
 fn tray_icon() -> tray_icon::Icon {
@@ -132,7 +151,12 @@ pub fn run() {
 
         let bg = cx.background_executor().clone();
         cx.spawn(async move |cx| {
+            let mut announced = false;
             loop {
+                if !announced && update::available().is_some() {
+                    announced = true;
+                    let _ = cx.update(|cx| cx.refresh_windows());
+                }
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
                         TrayCmd::Show => {
