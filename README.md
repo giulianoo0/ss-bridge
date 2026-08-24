@@ -17,7 +17,9 @@ macOS needs the Metal toolchain once: `xcodebuild -downloadComponent MetalToolch
 - `GET  /health` — `{ name, version }`
 - `POST /add` `{ magnet }` — `{ id, name, files: [{ index, name, path, size }] }`
 - `POST /select` `{ id, fileIndex }`
-- `GET  /stats/{id}` — `{ peers, downloadSpeed, downloaded, progress }`
+- `GET  /stats/{id}` — `{ peers, downloadSpeed, uploadSpeed, downloaded, progress }` plus
+  peer counters for diagnosing a slow swarm: `queued`, `connecting`, `seen`,
+  `dead`, `notNeeded`
 - `GET  /stream/{id}/{index}` (Range) — 206, blocks until the range has downloaded
 - `POST /close` `{ id }`
 

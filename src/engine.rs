@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
-use librqbit::{AddTorrent, AddTorrentOptions, Magnet, ManagedTorrent, Session, SessionOptions};
+use librqbit::{
+    AddTorrent, AddTorrentOptions, ListenerMode, ListenerOptions, Magnet, ManagedTorrent, Session,
+    SessionOptions,
+};
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::task::AbortHandle;
@@ -70,6 +73,15 @@ pub struct Stats {
     pub download_speed: u64,
     pub downloaded: u64,
     pub progress: f64,
+    pub queued: u64,
+    pub connecting: u64,
+    pub seen: u64,
+    pub dead: u64,
+    #[serde(rename = "notNeeded")]
+    pub not_needed: u64,
+    #[serde(rename = "uploadSpeed")]
+    pub upload_speed: u64,
+    pub fetched: u64,
 }
 
 fn env_duration(name: &str, default: Duration) -> Duration {
@@ -99,7 +111,7 @@ fn is_side_subtitle(name: &str, size: u64) -> bool {
 fn add_result(handle: &Handle) -> anyhow::Result<AddResult> {
     let guard = handle.metadata.load();
     let meta = guard.as_ref().ok_or_else(|| anyhow!("no metadata"))?;
-    let name = meta.name.clone().unwrap_or_else(|| "torrent".to_string());
+    let name = handle.name().unwrap_or_else(|| "torrent".to_string());
     let files = meta
         .file_infos
         .iter()
@@ -121,12 +133,16 @@ impl Engine {
     pub async fn new() -> anyhow::Result<Arc<Self>> {
         let dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir).join("ss-bridge");
         std::fs::create_dir_all(&dir).ok();
-        // Maximise peers: DHT on by default, plus a listen port and UPnP for
-        // incoming connections, fast-resume, and a big pack of public trackers
-        // added to every torrent so peer discovery is fast and wide.
+        // Peers are the whole ceiling on speed: librqbit fetches a piece from
+        // one peer at a time, so throughput is peers times what each uploads.
+        // uTP reaches the ones that refuse TCP, UPnP lets seeds dial in.
         let mut opts = SessionOptions::default();
-        opts.enable_upnp_port_forwarding = true;
-        opts.listen_port_range = Some(4240..4260);
+        opts.listen = Some(ListenerOptions {
+            mode: ListenerMode::TcpAndUtp,
+            listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, 4240).into(),
+            enable_upnp_port_forwarding: true,
+            ..Default::default()
+        });
         opts.fastresume = true;
         opts.trackers = TRACKERS.iter().filter_map(|t| url::Url::parse(t).ok()).collect();
         let session = Session::new_with_opts(dir, opts).await?;
@@ -246,18 +262,32 @@ impl Engine {
         };
         let stats = handle.stats();
         let total = selected_total.unwrap_or(stats.total_bytes).max(1);
-        let (peers, speed) = match &stats.live {
-            Some(live) => (
-                live.snapshot.peer_stats.live as u64,
+        let mut d = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        if let Some(live) = &stats.live {
+            let p = &live.snapshot.peer_stats;
+            d = (
+                p.live as u64,
                 (live.download_speed.mbps * 1_048_576.0) as u64,
-            ),
-            None => (0, 0),
-        };
+                p.queued as u64,
+                p.connecting as u64,
+                p.seen as u64,
+                p.dead as u64,
+                p.not_needed as u64,
+                (live.upload_speed.mbps * 1_048_576.0) as u64,
+            );
+        }
         Ok(Stats {
-            peers,
-            download_speed: speed,
+            peers: d.0,
+            download_speed: d.1,
             downloaded: stats.progress_bytes,
             progress: (stats.progress_bytes as f64 / total as f64).min(1.0),
+            queued: d.2,
+            connecting: d.3,
+            seen: d.4,
+            dead: d.5,
+            not_needed: d.6,
+            upload_speed: d.7,
+            fetched: stats.uploaded_bytes,
         })
     }
 
@@ -270,7 +300,7 @@ impl Engine {
 
     pub async fn read_range(&self, id: &str, index: usize, start: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         let handle = self.touch(id)?;
-        let mut stream = handle.clone().stream(index).context("stream")?;
+        let mut stream = handle.clone().stream(index).await.context("stream")?;
         stream.seek(SeekFrom::Start(start)).await?;
         let mut buf = vec![0u8; len as usize];
         stream.read_exact(&mut buf).await?;
