@@ -53,7 +53,7 @@ impl Render for StatusView {
 fn port_banner() -> impl IntoElement {
     let detail = match portmap::state() {
         portmap::State::NoRouter => "o roteador não respondeu ao UPnP",
-        _ => "o roteador não abriu a porta",
+        _ => "a porta UPnP não abriu",
     };
     div()
         .mt_2()
@@ -63,7 +63,7 @@ fn port_banner() -> impl IntoElement {
         .bg(rgb(0x2e2413))
         .text_sm()
         .text_color(rgb(0xf0c674))
-        .child(format!("torrents lentos: {detail} (porta {})", portmap::PORT))
+        .child(format!("alerta: {detail} (porta {}) — seus torrents podem ficar mais lentos", portmap::PORT))
 }
 
 fn update_banner(version: &'static str) -> impl IntoElement {
