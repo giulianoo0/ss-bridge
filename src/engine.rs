@@ -193,7 +193,12 @@ impl Engine {
         };
         let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await?;
         let handle = response.into_handle().ok_or_else(|| anyhow!("no handle"))?;
-        handle.wait_until_initialized().await?;
+        // A dead swarm never yields metadata; without the cap the add hangs
+        // forever and the session keeps an orphan torrent nothing can close.
+        if tokio::time::timeout(Duration::from_secs(25), handle.wait_until_initialized()).await.is_err() {
+            let _ = self.session.delete(handle.id().into(), true).await;
+            anyhow::bail!("no metadata from swarm");
+        }
 
         let result = add_result(&handle)?;
         let selected_total = select_only.map(|files| {
