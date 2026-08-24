@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::engine::Engine;
+use crate::portmap;
 
 pub const PORT: u16 = 32227;
 
@@ -46,10 +47,19 @@ pub async fn serve(engine: Arc<Engine>) -> anyhow::Result<()> {
 struct Health {
     name: &'static str,
     version: &'static str,
+    // "open" | "no-mapping" | "no-router" | "unknown" — a closed port is the
+    // difference between a torrent that flies and one that crawls, and the
+    // page is where the host will actually read the warning.
+    #[serde(rename = "portMapping")]
+    port_mapping: &'static str,
 }
 
 async fn health() -> Json<Health> {
-    Json(Health { name: "ss-bridge", version: env!("CARGO_PKG_VERSION") })
+    Json(Health {
+        name: "ss-bridge",
+        version: env!("CARGO_PKG_VERSION"),
+        port_mapping: portmap::state().as_str(),
+    })
 }
 
 #[derive(Deserialize)]

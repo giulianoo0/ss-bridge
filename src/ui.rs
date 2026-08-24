@@ -8,6 +8,7 @@ use gpui::{
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{MouseButton, TrayIconBuilder, TrayIconEvent};
 
+use crate::portmap;
 use crate::update;
 
 enum TrayCmd {
@@ -44,8 +45,25 @@ impl Render for StatusView {
                     .text_color(rgb(0x6b7080))
                     .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
             )
+            .children(portmap::state().is_closed().then(port_banner))
             .children(update::available().map(update_banner))
     }
+}
+
+fn port_banner() -> impl IntoElement {
+    let detail = match portmap::state() {
+        portmap::State::NoRouter => "o roteador não respondeu ao UPnP",
+        _ => "o roteador não abriu a porta",
+    };
+    div()
+        .mt_2()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .bg(rgb(0x2e2413))
+        .text_sm()
+        .text_color(rgb(0xf0c674))
+        .child(format!("torrents lentos: {detail} (porta {})", portmap::PORT))
 }
 
 fn update_banner(version: &'static str) -> impl IntoElement {

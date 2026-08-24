@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod engine;
+mod portmap;
 mod server;
 mod ui;
 mod update;
@@ -10,6 +11,7 @@ fn main() {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             tokio::spawn(update::check());
+            tokio::spawn(portmap::watch());
             match engine::Engine::new().await {
                 Ok(engine) => {
                     if let Err(err) = server::serve(engine).await {
