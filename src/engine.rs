@@ -14,6 +14,23 @@ use tokio::task::AbortHandle;
 
 type Handle = Arc<ManagedTorrent>;
 
+trait RangeStream: tokio::io::AsyncRead + tokio::io::AsyncSeek + Send + Unpin {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncSeek + Send + Unpin> RangeStream for T {}
+
+// A parked stream keeps librqbit's 32MB priority window pinned at its last
+// read position, so the swarm keeps fetching ahead of the playhead between
+// HTTP ranges instead of falling back to front-of-file order. One slot per
+// reader cursor: the remux has one, the subtitle scan another.
+struct StreamSlot {
+    meta: Mutex<(u64, Instant)>,
+    stream: tokio::sync::Mutex<Box<dyn RangeStream>>,
+}
+
+const MAX_SLOTS_PER_FILE: usize = 2;
+// Small files (sidecar subtitles) are read once; parking a stream for them
+// would only burn librqbit's blocking permits.
+const MIN_POOLED_FILE: u64 = 32 * 1024 * 1024;
+
 const TRACKERS: &[&str] = &[
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://open.tracker.cl:1337/announce",
@@ -42,6 +59,7 @@ struct Entry {
     last_active: Instant,
     pending_delete: Option<AbortHandle>,
     selected_total: Option<u64>,
+    slots: HashMap<usize, Vec<Arc<StreamSlot>>>,
 }
 
 pub struct Engine {
@@ -222,7 +240,14 @@ impl Engine {
             None => {
                 map.insert(
                     result.id.clone(),
-                    Entry { handle, refs: 1, last_active: Instant::now(), pending_delete: None, selected_total },
+                    Entry {
+                        handle,
+                        refs: 1,
+                        last_active: Instant::now(),
+                        pending_delete: None,
+                        selected_total,
+                        slots: HashMap::new(),
+                    },
                 );
             }
         }
@@ -302,11 +327,54 @@ impl Engine {
 
     pub async fn read_range(&self, id: &str, index: usize, start: u64, len: u64) -> anyhow::Result<Vec<u8>> {
         let handle = self.touch(id)?;
+        let mut buf = vec![0u8; len as usize];
+        if self.file_size(id, index)? >= MIN_POOLED_FILE {
+            let slot = self.slot(id, &handle, index, start).await?;
+            // A busy slot means another read is blocked on the swarm; queuing
+            // behind it would serialize readers that used to run in parallel,
+            // so the read falls through to a throwaway stream instead.
+            if let Ok(mut stream) = slot.stream.try_lock() {
+                stream.seek(SeekFrom::Start(start)).await?;
+                stream.read_exact(&mut buf).await?;
+                drop(stream);
+                *slot.meta.lock().unwrap() = (start + len, Instant::now());
+                return Ok(buf);
+            };
+        }
         let mut stream = handle.clone().stream(index).await.context("stream")?;
         stream.seek(SeekFrom::Start(start)).await?;
-        let mut buf = vec![0u8; len as usize];
         stream.read_exact(&mut buf).await?;
         Ok(buf)
+    }
+
+    async fn slot(&self, id: &str, handle: &Handle, index: usize, start: u64) -> anyhow::Result<Arc<StreamSlot>> {
+        {
+            let mut map = self.torrents.lock().unwrap();
+            let entry = map.get_mut(id).ok_or_else(|| anyhow!("unknown torrent"))?;
+            let slots = entry.slots.entry(index).or_default();
+            // A read continuing where a cursor stopped keeps that cursor's
+            // priority window rolling; a brand-new position takes over the
+            // cursor that has been quiet the longest.
+            if let Some(slot) = slots.iter().find(|s| s.meta.lock().unwrap().0 == start) {
+                return Ok(slot.clone());
+            }
+            if slots.len() >= MAX_SLOTS_PER_FILE {
+                let slot = slots.iter().min_by_key(|s| s.meta.lock().unwrap().1).unwrap();
+                return Ok(slot.clone());
+            }
+        }
+        let stream = handle.clone().stream(index).await.context("stream")?;
+        let slot = Arc::new(StreamSlot {
+            meta: Mutex::new((start, Instant::now())),
+            stream: tokio::sync::Mutex::new(Box::new(stream)),
+        });
+        let mut map = self.torrents.lock().unwrap();
+        let entry = map.get_mut(id).ok_or_else(|| anyhow!("unknown torrent"))?;
+        let slots = entry.slots.entry(index).or_default();
+        if slots.len() < MAX_SLOTS_PER_FILE {
+            slots.push(slot.clone());
+        }
+        Ok(slot)
     }
 
     pub async fn close(&self, id: &str) {
@@ -318,6 +386,7 @@ impl Engine {
                     if entry.refs > 0 {
                         return;
                     }
+                    entry.slots.clear();
                     entry.handle.clone()
                 }
                 None => return,
@@ -360,6 +429,7 @@ impl Engine {
                 })
                 .map(|(id, entry)| {
                     entry.refs = 0;
+                    entry.slots.clear();
                     (id.clone(), entry.handle.clone())
                 })
                 .collect()

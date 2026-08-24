@@ -119,22 +119,26 @@ async fn stream(
     Ok(res.body(Body::from(bytes)).unwrap())
 }
 
+// The whole range is buffered before the response leaves; an open-ended
+// range would mean the rest of the file in RAM, so it is served in a
+// 64MB-capped slice and the client follows up with the next Range.
+const MAX_RANGE: u64 = 64 * 1024 * 1024;
+
 fn parse_range(value: Option<&header::HeaderValue>, size: u64) -> (u64, u64) {
     let last = size.saturating_sub(1);
     let raw = match value.and_then(|v| v.to_str().ok()) {
         Some(v) => v,
-        None => return (0, last),
+        None => return (0, last.min(MAX_RANGE - 1)),
     };
     let spec = raw.strip_prefix("bytes=").unwrap_or(raw);
     let mut parts = spec.splitn(2, '-');
     let start = parts.next().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
-    let end = parts
-        .next()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(last)
-        .min(last);
+    let end = match parts.next().and_then(|s| s.trim().parse::<u64>().ok()) {
+        Some(end) => end.min(last),
+        None => last.min(start + MAX_RANGE - 1),
+    };
     if end < start {
-        (0, last)
+        (0, last.min(MAX_RANGE - 1))
     } else {
         (start, end)
     }

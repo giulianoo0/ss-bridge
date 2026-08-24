@@ -6884,7 +6884,7 @@ dependencies = [
 
 [[package]]
 name = "ss-bridge"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

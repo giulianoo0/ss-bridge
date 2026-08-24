@@ -1,3 +1,4 @@
 /target
 /dist
 packaging/AppIcon.iconset
+.DS_Store
