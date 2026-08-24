@@ -199,19 +199,22 @@ impl Engine {
         }
 
         let select_only = Magnet::parse(magnet).ok().and_then(|m| m.get_select_only());
-        // Nothing downloads until a file is chosen: a season pack would
-        // otherwise pull every episode while the picker is still open. A
-        // magnet carrying its own selection (so=) keeps it instead.
+        // Paused with everything selected: the initial checksum then validates
+        // every byte already on disk (an episode watched in a previous run
+        // resumes instantly), while the pause keeps the season pack from
+        // downloading before a file is chosen. select() unpauses. A magnet
+        // carrying its own selection (so=) starts live instead.
         let options = AddTorrentOptions {
             overwrite: true,
-            only_files: select_only.is_none().then_some(Vec::new()),
+            paused: select_only.is_none(),
             ..Default::default()
         };
         let response = self.session.add_torrent(AddTorrent::from_url(magnet), Some(options)).await?;
         let handle = response.into_handle().ok_or_else(|| anyhow!("no handle"))?;
         // A dead swarm never yields metadata; without the cap the add hangs
         // forever and the session keeps an orphan torrent nothing can close.
-        if tokio::time::timeout(Duration::from_secs(25), handle.wait_until_initialized()).await.is_err() {
+        // The window also covers checksumming a whole pack off disk.
+        if tokio::time::timeout(Duration::from_secs(90), handle.wait_until_initialized()).await.is_err() {
             let _ = self.session.delete(handle.id().into(), true).await;
             anyhow::bail!("no metadata from swarm");
         }
@@ -275,6 +278,7 @@ impl Engine {
             anyhow::bail!("no such file");
         }
         self.session.update_only_files(&handle, &only).await?;
+        self.session.unpause(&handle).await.ok();
         if let Some(entry) = self.torrents.lock().unwrap().get_mut(id) {
             entry.selected_total = Some(selected_total);
         }
