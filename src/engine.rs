@@ -161,6 +161,17 @@ impl Engine {
         });
         opts.fastresume = true;
         opts.trackers = TRACKERS.iter().filter_map(|t| url::Url::parse(t).ok()).collect();
+        // A dead peer holding a connect slot for the default 10s is what makes
+        // a fresh swarm take minutes to ramp; streaming clients kill and move
+        // on in a few seconds.
+        opts.connect = Some(librqbit::ConnectionOptions {
+            peer_opts: Some(librqbit::PeerConnectionOptions {
+                connect_timeout: Some(Duration::from_secs(4)),
+                read_write_timeout: Some(Duration::from_secs(8)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
         let session = Session::new_with_opts(dir, opts).await?;
         let engine = Arc::new(Self {
             session,
