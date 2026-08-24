@@ -79,8 +79,6 @@ pub struct Stats {
     pub dead: u64,
     #[serde(rename = "notNeeded")]
     pub not_needed: u64,
-    #[serde(rename = "uploadSpeed")]
-    pub upload_speed: u64,
     pub fetched: u64,
 }
 
@@ -278,7 +276,7 @@ impl Engine {
                 p.seen as u64,
                 p.dead as u64,
                 p.not_needed as u64,
-                (live.upload_speed.mbps * 1_048_576.0) as u64,
+                live.snapshot.fetched_bytes,
             );
         }
         Ok(Stats {
@@ -291,8 +289,7 @@ impl Engine {
             seen: d.4,
             dead: d.5,
             not_needed: d.6,
-            upload_speed: d.7,
-            fetched: stats.uploaded_bytes,
+            fetched: d.7,
         })
     }
 
@@ -340,7 +337,10 @@ impl Engine {
             tokio::time::sleep(delay).await;
             let gone = torrents.lock().unwrap().remove(&key).is_some();
             if gone {
-                let _ = session.delete(rqbit_id.into(), true).await;
+                // The bytes stay in Downloads: the initial checksum turns them
+                // back into instant resume on the next open, and a room
+                // revisiting an already-watched stretch reads them from disk.
+                let _ = session.delete(rqbit_id.into(), false).await;
             }
         });
         let mut map = self.torrents.lock().unwrap();
